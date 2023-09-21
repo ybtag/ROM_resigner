@@ -92,6 +92,29 @@ def sign(jar, certtype):
         print(("Signing " + os.path.basename(jar) + " failed"))
 
 
+def zipalign(jar):
+    jartmpdir = tmpdir + "/JARTMP"
+    if not os.path.exists(jartmpdir):
+    	os.makedirs(jartmpdir)
+
+    zipaligncmd = "zipalign -f -p 4 " + jar + " " + jartmpdir + "/" + os.path.basename(jar)
+
+    movecmd = "mv -f " + jartmpdir + "/" + os.path.basename(jar) + " " + jar
+    try:
+        output = subprocess.check_output(['bash', '-c', zipaligncmd])
+        output += subprocess.check_output(['bash', '-c', movecmd])
+        print((os.path.basename(jar) + " zipaligned"))
+    except subprocess.CalledProcessError:
+        print(("Zipaligning " + os.path.basename(jar) + " failed"))
+
+def recontext(jar):
+    contextcmd = 'sudo setfattr -n security.selinux -v "u:object_r:system_file:s0" ' + jar
+    try:
+        output = subprocess.check_output(['bash', '-c', contextcmd])
+        print("Restored context for " + (os.path.basename(jar)))
+    except subprocess.CalledProcessError:
+        print(("Restoring context for " + os.path.basename(jar) + " failed"))
+
 index = 0
 for s in itemlist:
     signatures.append(s.attributes['signature'].value)
@@ -126,6 +149,8 @@ for root, dirs, files in os.walk(romdir):
                 for seinfo in seinfos:
                     if CheckCert(out, signatures64[index].encode()):
                         sign(jarfile, seinfo)
+                        zipalign(jarfile)
+                        recontext(jarfile)
                         break
                     index += 1
                 if index == certlen:
