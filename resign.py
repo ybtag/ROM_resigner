@@ -10,6 +10,7 @@ import fileinput
 import codecs
 
 cwd = os.path.dirname(os.path.realpath(__file__))
+useApkSigner = False # If you prefer, set this to Trueif you have apksigner installed
 
 
 def find(pattern, path):
@@ -21,22 +22,32 @@ def find(pattern, path):
 
 parser = argparse.ArgumentParser(
     description="Python Script to resign an Android ROM using custom keys")
-parser.add_argument('RomDir', help='ROM Path')
+parser.add_argument('RomDir', help='ROM Path. You can pass multiple folders, separated by comma')
 parser.add_argument(
     'SecurityDir', help='Security Dir Path (just like https://android.googlesource.com/platform/build/+/master/target/product/security/)')
 args = parser.parse_args()
-romdir = args.RomDir
-securitydir = args.SecurityDir
+itemlist = []
+seinfos = []
+mac_permissions = []
+romdir = args.RomDir.split(',')
+for i in range(len(romdir)):
+    romdir[i] = os.path.abspath(romdir[i])
+    #print (romdir[i])
+    mac_permissions_file = find("*mac_permissions*", romdir[i] + "/etc/selinux")
+    if mac_permissions_file != None:
+        #print (mac_permissions_file)
+        mac_permissions.append(mac_permissions_file)
+        xmldoc = minidom.parse(mac_permissions_file)
+        itemlist += xmldoc.getElementsByTagName('signer')
+        for seinfo in xmldoc.getElementsByTagName('seinfo'):
+            seinfos.append(seinfo.attributes['value'].value)
+    
+securitydir = os.path.abspath(args.SecurityDir)
 
-mac_permissions = find("*mac_permissions*", romdir + "/etc/selinux")
-
-xmldoc = minidom.parse(mac_permissions)
-itemlist = xmldoc.getElementsByTagName('signer')
 certlen = len(itemlist)
 
 signatures = []
 signatures64 = []
-seinfos = []
 usedseinfos = []
 
 tmpdir = cwd + "/tmp"
@@ -77,7 +88,7 @@ def sign(jar, certtype):
     if not os.path.exists(jartmpdir):
         os.makedirs(jartmpdir)
 
-    signjarcmd = "java -XX:+UseCompressedOops -Xms2g -Xmx2g -Djava.library.path=" + signapklibs + " -jar " + signapkjar + " " + securitydir + \
+    signjarcmd = "java -XX:+UseCompressedOops -XX:+PerfDisableSharedMem -Xms2g -Xmx2g -Djava.library.path=" + signapklibs + " -jar " + signapkjar + " " + securitydir + \
         "/" + certtype + ".x509.pem " + securitydir + "/" + certtype + \
         ".pk8 " + jar + " " + jartmpdir + "/" + os.path.basename(jar)
 
@@ -95,7 +106,7 @@ def sign(jar, certtype):
 def zipalign(jar):
     jartmpdir = tmpdir + "/JARTMP"
     if not os.path.exists(jartmpdir):
-    	os.makedirs(jartmpdir)
+        os.makedirs(jartmpdir)
 
     zipaligncmd = "zipalign -f -p 4 " + jar + " " + jartmpdir + "/" + os.path.basename(jar)
 
@@ -106,6 +117,15 @@ def zipalign(jar):
         print((os.path.basename(jar) + " zipaligned"))
     except subprocess.CalledProcessError:
         print(("Zipaligning " + os.path.basename(jar) + " failed"))
+
+def apksign(jar, certtype):
+    apksigncmd = "apksigner sign --key " + securitydir + "/" + certtype + ".pk8 --cert " + securitydir + "/" + certtype + ".x509.pem  " + jar
+    #print (apksigncmd)
+    try:
+        output = subprocess.check_output(['bash', '-c', apksigncmd])
+        print((os.path.basename(jar) + " apksigned"))
+    except subprocess.CalledProcessError:
+        print(("Apksigning " + os.path.basename(jar) + " failed"))
 
 def recontext(jar):
     contextcmd = 'sudo setfattr -n security.selinux -v "u:object_r:system_file:s0" ' + jar
@@ -124,48 +144,49 @@ for s in itemlist:
 
     signatures64.append(re.sub("(.{64})", "\\1\n", test64, 0, re.DOTALL))
 
-    seinfos.append(xmldoc.getElementsByTagName('seinfo')
-                   [index].attributes['value'].value)
-    index += 1
+if not os.path.exists(tmpdir):
+    os.makedirs(tmpdir)
 
-for root, dirs, files in os.walk(romdir):
-    for file in files:
-        if file.endswith(".apk") or file.endswith(".jar") or file.endswith(".apex"):
-            jarfile = os.path.join(root, file)
+for romdirItem in romdir:
+    for root, dirs, files in os.walk(romdirItem):
+        for file in files:
+            if file.endswith(".apk") or file.endswith(".jar") or file.endswith(".apex"):
+                jarfile = os.path.join(root, file)
 
-            if not os.path.exists(tmpdir):
-                os.makedirs(tmpdir)
-            os.chdir(tmpdir)
+                os.chdir(tmpdir)
+                out = "foo.cer"
+                if os.path.exists(out):
+                    os.remove(out)
 
-            out = "foo.cer"
-            if os.path.exists(out):
-                os.remove(out)
-
-            getcert(jarfile, out)
-            if not os.path.exists(out):
-                print((file + " : No signature => Skip"))
-            else:
-                index = 0
-                for seinfo in seinfos:
-                    if CheckCert(out, signatures64[index].encode()):
-                        sign(jarfile, seinfo)
-                        zipalign(jarfile)
-                        recontext(jarfile)
-                        break
-                    index += 1
-                if index == certlen:
-                    print((file + " : Unknown => keeping signature"))
+                getcert(jarfile, out)
+                if not os.path.exists(out):
+                    print((file + " : No signature => Skip"))
+                else:
+                    index = 0
+                    for seinfo in seinfos:
+                        if CheckCert(out, signatures64[index].encode()):
+                            #zipalign(jarfile) #zipalign not needed as already alligned. Old code called it after signing, and that was worse, as it messed up signature
+                            if useApkSigner:
+                                apksign(jarfile, seinfo)
+                            else:
+                                sign(jarfile, seinfo)
+                            recontext(jarfile)
+                            break
+                        index += 1
+                    if index == certlen:
+                        print((file + " : Unknown => keeping signature"))
 
 index = 0
 for s in itemlist:
     oldsignature = s.attributes['signature'].value
-    seinfo = xmldoc.getElementsByTagName(
-        'seinfo')[index].attributes['value'].value
+    seinfo = seinfos[index]
     index += 1
     if seinfo in usedseinfos:
         pemtoder = "openssl x509 -outform der -in " + \
             securitydir + "/" + seinfo + ".x509.pem"
         output = subprocess.check_output(['bash', '-c', pemtoder])
         newsignature = output.hex()
-        for line in fileinput.input(mac_permissions, inplace=True):
-            print(line.replace(oldsignature, newsignature), end=' ')
+        #print (newsignature)
+        for mac_permissions_file in mac_permissions:
+            for line in fileinput.input(mac_permissions_file, inplace=True):
+                print(line.replace(oldsignature, newsignature), end=' ')
