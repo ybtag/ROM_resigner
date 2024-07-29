@@ -10,15 +10,13 @@ import fileinput
 import codecs
 
 cwd = os.path.dirname(os.path.realpath(__file__))
-useApkSigner = False # If you prefer, set this to Trueif you have apksigner installed
-
+useApkSigner = False # If you prefer, set this to True if you have apksigner installed
 
 def find(pattern, path):
     for root, dirs, files in os.walk(path):
         for name in files:
             if fnmatch.fnmatch(name, pattern):
                 return os.path.join(root, name)
-
 
 parser = argparse.ArgumentParser(
     description="Python Script to resign an Android ROM using custom keys")
@@ -55,29 +53,38 @@ signapkjar = cwd + "/signapk.jar"
 os_info = os.uname()[0]
 signapklibs = cwd + "/" + os_info
 
-
 def CheckCert(filetoopen, cert):
-    f = open(filetoopen)
-    s = mmap.mmap(f.fileno(), 0, access=mmap.ACCESS_READ)
-    if s.find(cert) != -1:
-        return True
-    else:
-        return False
-
+    with open(filetoopen, 'rb') as f:
+        s = mmap.mmap(f.fileno(), 0, access=mmap.ACCESS_READ)
+        if s.find(cert) != -1:
+            #print("checkcert passed")
+            return True
+    #print("checkcert failed")
+    return False
 
 def getcert(jar, out):
-    extractjar = "7z e " + jar + " META-INF/CERT.RSA -o" + tmpdir
-    x = subprocess.run(
-        ['7z', 't', jar], stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
-    if x.returncode == 0:
-        output = subprocess.check_output(['bash', '-c', extractjar])
+    try:
+        # List all files in META-INF directory
+        listmeta = f"7z l {jar} META-INF/*"
+        output = subprocess.check_output(['bash', '-c', listmeta]).decode()
+        cert_files = re.findall(r"META-INF/(.*?\.(RSA|EC|DSA))", output)
 
-    if os.path.exists(tmpdir + "/CERT.RSA"):
-        extractcert = "openssl pkcs7 -in " + tmpdir + \
-            "/CERT.RSA -print_certs -inform DER -out " + out
-        output = subprocess.check_output(['bash', '-c', extractcert])
-        os.remove(tmpdir + "/CERT.RSA")
-
+        for cert_file, _ in cert_files:
+            extractjar = f"7z e {jar} META-INF/{cert_file} -o{tmpdir}"
+            x = subprocess.run(['7z', 't', jar], stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+            if x.returncode == 0:
+                try:
+                    output = subprocess.check_output(['bash', '-c', extractjar])
+                    if os.path.exists(f"{tmpdir}/{cert_file}"):
+                        extractcert = f"openssl pkcs7 -in {tmpdir}/{cert_file} -print_certs -inform DER -out {out}"
+                        output = subprocess.check_output(['bash', '-c', extractcert])
+                        #print (output)
+                        os.remove(f"{tmpdir}/{cert_file}")
+                        break
+                except subprocess.CalledProcessError:
+                    continue
+    except subprocess.CalledProcessError:
+        pass
 
 def sign(jar, certtype):
     if not os.path.exists(securitydir + "/" + certtype + ".pk8"):
@@ -91,6 +98,7 @@ def sign(jar, certtype):
     signjarcmd = "java -XX:+UseCompressedOops -XX:+PerfDisableSharedMem -Xms2g -Xmx2g -Djava.library.path=" + signapklibs + " -jar " + signapkjar + " " + securitydir + \
         "/" + certtype + ".x509.pem " + securitydir + "/" + certtype + \
         ".pk8 " + jar + " " + jartmpdir + "/" + os.path.basename(jar)
+    print(signjarcmd)
 
     movecmd = "mv -f " + jartmpdir + "/" + os.path.basename(jar) + " " + jar
     try:
@@ -101,7 +109,6 @@ def sign(jar, certtype):
             seinfo) if seinfo not in usedseinfos else usedseinfos
     except subprocess.CalledProcessError:
         print(("Signing " + os.path.basename(jar) + " failed"))
-
 
 def zipalign(jar):
     jartmpdir = tmpdir + "/JARTMP"
